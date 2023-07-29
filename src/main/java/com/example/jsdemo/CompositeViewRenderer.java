@@ -1,141 +1,181 @@
 package com.example.jsdemo;
 
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
-import org.reactivestreams.Publisher;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
+import org.springframework.core.ResolvableType;
 import org.springframework.core.annotation.Order;
-import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferFactory;
-import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpInputMessage;
+import org.springframework.http.HttpOutputMessage;
 import org.springframework.http.MediaType;
-import org.springframework.http.server.reactive.ServerHttpResponse;
-import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
+import org.springframework.http.converter.AbstractHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.http.converter.HttpMessageNotWritableException;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.reactive.HandlerResult;
-import org.springframework.web.reactive.HandlerResultHandler;
-import org.springframework.web.reactive.result.method.InvocableHandlerMethod;
-import org.springframework.web.reactive.result.view.Rendering;
-import org.springframework.web.reactive.result.view.View;
-import org.springframework.web.reactive.result.view.ViewResolver;
-import org.springframework.web.server.ServerWebExchange;
-import org.springframework.web.server.ServerWebExchangeDecorator;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.View;
+import org.springframework.web.servlet.ViewResolver;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
-public class CompositeViewRenderer implements HandlerResultHandler {
+public class CompositeViewRenderer implements HandlerInterceptor, WebMvcConfigurer {
 
-	private final ViewResolver resolver;
+	private static Log logger = LogFactory.getLog(CompositeViewRenderer.class);
 
-	public CompositeViewRenderer(ViewResolver resolver) {
-		this.resolver = resolver;
+	private ViewResolver resolver;
+
+	private final ApplicationContext context;
+
+	public CompositeViewRenderer(ApplicationContext context) {
+		this.context = context;
 	}
 
 	@Override
-	public boolean supports(HandlerResult result) {
-		if (Publisher.class.isAssignableFrom(result.getReturnType().toClass())) {
-			if (Rendering.class.isAssignableFrom(result.getReturnType().getGeneric(0).toClass())) {
+	public void configureMessageConverters(List<HttpMessageConverter<?>> converters) {
+		converters.add(new ServerSentEventHttpMessageConverter());
+	}
+
+	@Override
+	public void addInterceptors(InterceptorRegistry registry) {
+		registry.addInterceptor(this);
+	}
+
+	@Override
+	public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler,
+			ModelAndView modelAndView) throws Exception {
+
+		initialize();
+		if (modelAndView == null || !HandlerMethod.class.isInstance(handler)) {
+			return;
+		}
+
+		HandlerMethod method = (HandlerMethod) handler;
+		if (!supportsReturnType(method.getReturnType())) {
+			return;
+		}
+
+		String attribute = "modelAndViewList";
+		handleReturnValue(modelAndView.getModel().get(attribute), method.getReturnType(), modelAndView, response);
+
+	}
+
+	private boolean supportsReturnType(MethodParameter returnType) {
+		if (List.class.isAssignableFrom(returnType.getParameterType())) {
+			if (ModelAndView.class
+					.isAssignableFrom(ResolvableType.forMethodParameter(returnType).getGeneric().resolve())) {
 				return true;
 			}
 		}
 		return false;
 	}
 
-	@Override
-	public Mono<Void> handleResult(ServerWebExchange exchange, HandlerResult result) {
-		String[] methodAnnotation = ((InvocableHandlerMethod) result.getHandler())
+	private void initialize() {
+		if (this.resolver == null) {
+			this.resolver = context.getBean("viewResolver", ViewResolver.class);
+		}
+	}
+
+	private void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+			ModelAndView mavContainer, HttpServletResponse response) throws Exception {
+		String[] methodAnnotation = returnType
 				.getMethodAnnotation(RequestMapping.class).produces();
 		MediaType type = methodAnnotation.length > 0 ? MediaType.valueOf(methodAnnotation[0]) : MediaType.TEXT_HTML;
-		exchange.getResponse().getHeaders().setContentType(type);
-		boolean sse = MediaType.TEXT_EVENT_STREAM.includes(type);
+		response.setContentType(type.toString());
 		@SuppressWarnings("unchecked")
-		Flux<Rendering> renderings = Flux.from((Publisher<Rendering>) result.getReturnValue());
-		final ExchangeWrapper wrapper = new ExchangeWrapper(exchange);
-		return exchange.getResponse().writeAndFlushWith(render(wrapper, renderings)
-				.map(buffers -> transform(exchange.getResponse().bufferFactory(), buffers, sse)));
+		List<ModelAndView> renderings = resolve(response, (List<ModelAndView>) returnValue);
+		mavContainer.setView(new CompositeView(renderings));
 	}
 
-	private Publisher<DataBuffer> transform(DataBufferFactory factory, Publisher<DataBuffer> buffers, boolean sse) {
-		if (sse) {
-			buffers = Flux.from(buffers).map(buffer -> prefix(buffer, factory.allocateBuffer(buffer.capacity())));
+	private List<ModelAndView> resolve(HttpServletResponse response, List<ModelAndView> renderings) {
+		for (ModelAndView rendering : renderings) {
+			try {
+				resolve(response, rendering);
+			} catch (Exception e) {
+				logger.error("Failed to resolve view", e);
+			}
 		}
-		// Add closing empty lines
-		return Flux.from(buffers).map(buffer -> buffer.write("\n\n", StandardCharsets.UTF_8));
+		return renderings;
 	}
 
-	private DataBuffer prefix(DataBuffer buffer, DataBuffer result) {
-		String body = buffer.toString(StandardCharsets.UTF_8);
-		body = "data:" + body.replace("\n", "\ndata:");
-		result.write(body, StandardCharsets.UTF_8);
-		DataBufferUtils.release(buffer);
-		return result;
-	}
-
-	private Flux<Flux<DataBuffer>> render(ExchangeWrapper exchange, Flux<Rendering> renderings) {
-		return renderings.flatMap(rendering -> render(exchange, rendering));
-	}
-
-	private Publisher<Flux<DataBuffer>> render(ExchangeWrapper exchange, Rendering rendering) {
-		Mono<View> view = null;
-		if (rendering.view() instanceof View) {
-			view = Mono.just((View) rendering.view());
-		} else {
-			view = resolver.resolveViewName((String) rendering.view(), exchange.getLocaleContext().getLocale());
+	private void resolve(HttpServletResponse response, ModelAndView rendering) throws Exception {
+		if (!(rendering.getView() instanceof View)) {
+			Locale locale = response.getLocale();
+			if (locale == null) {
+				locale = Locale.getDefault();
+			}
+			View view = resolver.resolveViewName((String) rendering.getViewName(), locale);
+			rendering.setView(view);
 		}
-		return view.flatMap(actual -> actual.render(rendering.modelAttributes(), null, exchange))
-				.thenMany(Flux.defer(() -> exchange.release()));
 	}
 
-	static class ExchangeWrapper extends ServerWebExchangeDecorator {
+	static class CompositeView implements View {
 
-		private ResponseWrapper response;
+		private List<ModelAndView> renderings;
 
-		protected ExchangeWrapper(ServerWebExchange delegate) {
-			super(delegate);
-			this.response = new ResponseWrapper(super.getResponse());
+		public CompositeView(List<ModelAndView> renderings) {
+			this.renderings = renderings;
 		}
 
 		@Override
-		public ServerHttpResponse getResponse() {
-			return this.response;
-		}
-
-		public Flux<Flux<DataBuffer>> release() {
-			Flux<Flux<DataBuffer>> body = response.getBody();
-			this.response = new ResponseWrapper(super.getResponse());
-			return body;
+		public void render(@Nullable Map<String, ?> model, HttpServletRequest request, HttpServletResponse response)
+				throws Exception {
+			for (ModelAndView rendering : renderings) {
+				rendering.getView().render(rendering.getModel(), request, response);
+				response.getWriter().write("\n\n");
+			}
 		}
 
 	}
 
-	static class ResponseWrapper extends ServerHttpResponseDecorator {
+	class ServerSentEventHttpMessageConverter extends AbstractHttpMessageConverter<ModelAndView> {
 
-		private Flux<Flux<DataBuffer>> body = Flux.empty();
-
-		public Flux<Flux<DataBuffer>> getBody() {
-			return body;
-		}
-
-		public ResponseWrapper(ServerHttpResponse delegate) {
-			super(delegate);
+		public ServerSentEventHttpMessageConverter() {
+			super(MediaType.APPLICATION_JSON);
 		}
 
 		@Override
-		public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
-			return writeAndFlushWith(Mono.just(body));
+		protected boolean supports(Class<?> clazz) {
+			return ModelAndView.class.isAssignableFrom(clazz);
 		}
 
 		@Override
-		public Mono<Void> writeAndFlushWith(Publisher<? extends Publisher<? extends DataBuffer>> body) {
-			Flux<Flux<DataBuffer>> map = Flux.from(body).map(publisher -> Flux.from(publisher));
-			this.body = this.body.concatWith(map);
-			return Mono.empty();
+		protected ModelAndView readInternal(Class<? extends ModelAndView> clazz, HttpInputMessage inputMessage)
+				throws IOException, HttpMessageNotReadableException {
+			throw new UnsupportedOperationException("Unimplemented method 'readInternal'");
 		}
 
+		@Override
+		protected void writeInternal(ModelAndView wrapper, HttpOutputMessage outputMessage)
+				throws IOException, HttpMessageNotWritableException {
+			ServletWebRequest webRequest = (ServletWebRequest) RequestContextHolder.getRequestAttributes()
+					.getAttribute("wrapper.request", RequestAttributes.SCOPE_REQUEST);
+			try {
+				resolve(webRequest.getResponse(), wrapper);
+				wrapper.getView().render(wrapper.getModel(), webRequest.getRequest(), webRequest.getResponse());
+			} catch (Exception e) {
+				throw new IllegalStateException("Failed to render view", e);
+			}
+		}
 	}
 
 }
