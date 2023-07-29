@@ -19,8 +19,6 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import reactor.core.publisher.Flux;
 
 @SpringBootApplication
@@ -29,11 +27,8 @@ public class JsDemoApplication {
 
 	private final ObjectMapper mapper;
 
-	private final SseViewHelper sseViewHelper;
-
-	public JsDemoApplication(ObjectMapper objectMapper, SseViewHelper sseViewHelper) {
+	public JsDemoApplication(ObjectMapper objectMapper) {
 		this.mapper = objectMapper;
-		this.sseViewHelper = sseViewHelper;
 	}
 
 	@GetMapping("/user")
@@ -62,9 +57,9 @@ public class JsDemoApplication {
 	}
 
 	@GetMapping(path = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-	public SseEmitter stream(HttpServletRequest request, HttpServletResponse response) {
-		return sseViewHelper.stream(request, response, "time", Flux.interval(Duration.ofSeconds(5)).map(
-				value -> Map.of("value", value, "time", System.currentTimeMillis())));
+	public SseEmitter stream(SseViewBuilder builder) {
+		return builder.stream(Flux.interval(Duration.ofSeconds(5)).map(
+				value -> new ModelAndView("time", Map.of("value", value, "time", System.currentTimeMillis())))).build();
 	}
 
 	@GetMapping(path = "/test")
