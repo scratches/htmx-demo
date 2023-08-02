@@ -1,7 +1,7 @@
 from django.urls import path
-from views import *
+import views
 
 urlpatterns = [
-    path('', home, name='home'),
-    path('stream', stream, name='stream'),
+    path('', views.home, name='home'),
+    path('stream', views.stream, name='stream'),
 ]
