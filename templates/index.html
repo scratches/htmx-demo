@@ -1,0 +1,42 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+	<title>Demo</title>
+	<meta name="description" content="" />
+	<meta name="viewport" content="width=device-width" />
+	<base href="/" />
+	<link rel="stylesheet" type="text/css" href="https://unpkg.com/bootstrap/dist/css/bootstrap.min.css" />
+	<script async src="https://unpkg.com/es-module-shims"></script>
+	<script type="importmap">
+		{
+			"imports": {
+				"bootstrap": "https://unpkg.com/bootstrap",
+				"@popperjs/core": "https://unpkg.com/@popperjs/core",
+				"htmx": "{% static 'htmx.js' %}",
+				"htmx-sse": "https://unpkg.com/htmx.org/dist/ext/sse.js"
+			}
+		}
+	</script>
+	<script type="module">
+		import 'htmx';
+		import 'htmx-sse';
+	</script>
+</head>
+
+<body>
+	<header>
+		<h1>Demo</h1>
+	</header>
+	<main>
+		<br />
+		<div class="container" hx-ext="sse" sse-connect="/stream">
+			<div id="load" sse-swap="message"></div>
+		</div>
+	</main>
+</body>
+
+</html>
