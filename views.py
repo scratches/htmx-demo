@@ -11,7 +11,7 @@ def stream(request):
         while True:
             time.sleep(3)
             value = value + 1
-            yield 'data:<div>Index: %d, Time: %s</div>\n\n' % (value, datetime.datetime.now().isoformat())
+            yield 'data:%s\n\n' % template.render({'value': value, 'time': datetime.datetime.now().isoformat()})
     return StreamingHttpResponse(event_stream(), content_type='text/event-stream')
 
 def home(request):
